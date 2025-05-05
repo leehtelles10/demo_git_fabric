@@ -1,0 +1,144 @@
+expression base_transacoes = "C:\Users\EY96\OneDrive - PETROBRAS\Documentos\projetos\youtube-20241111-git-github-main\transacoes.xlsx" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: a568a7ad-2f95-41d5-8356-4fa752d7cf69
+	queryGroup: Parâmetros
+
+	annotation PBI_NavigationStepName = Navegação
+
+	annotation PBI_ResultType = Text
+
+expression data_inicial = #date(2024, 11, 1) meta [IsParameterQuery=true, Type="Date", IsParameterQueryRequired=true]
+	lineageTag: f5be46ac-e16f-4cbe-b6fc-4f87efb14298
+	queryGroup: Parâmetros
+
+	annotation PBI_NavigationStepName = Navegação
+
+	annotation PBI_ResultType = Date
+
+expression getCotacoes = ```
+		let
+		    // Função principal para chamar a API do Banco Central
+		    getCotacoes = (dataInicial as date, dataFinal as date, moeda as text, pagina as number) as table =>
+		    let
+		        url = "https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata",
+		        endpoint = "CotacaoMoedaPeriodo(moeda=@moeda,dataInicial=@dataInicial,dataFinalCotacao=@dataFinalCotacao)",
+		        query = [
+		            #"@moeda" = "'" & moeda & "'",
+		            #"@dataInicial" = "'" &  Date.ToText(dataInicial,"MM-dd-yyyy") & "'",
+		            #"@dataFinalCotacao" = "'" & Date.ToText(dataFinal,"MM-dd-yyyy") & "'",
+		            #"$top" = Number.ToText(100),
+		            #"$skip" = Number.ToText((pagina-1)*100),
+		            #"$format"= "json"
+		        ],
+		        request = Web.Contents(
+		            url,
+		            [ RelativePath = endpoint, Query = query ]
+		        ),
+		        response = Json.Document(request, 65001), 
+		        lista = response[value] 
+		    in
+		        Table.FromRecords(lista),
+		
+		    // Função auxiliar para gerar uma lista de datas recuando até 30 dias
+		    gerarDatas = (dataInicial as date, dias as number) as list =>
+		        List.Transform( {0..dias}, each Date.AddDays(dataInicial, -_) ),
+		
+		    // Função que encontra a última data com cotação disponível
+		    obterUltimaDataComCotacao = (dataInicial as date, moeda as text) as date =>
+		    let
+		        listaDatas = gerarDatas(dataInicial, 30),
+		        datasComDados = List.Select(
+		            listaDatas,
+		            each 
+		                let
+		                    resultado = try getCotacoes(_, _, moeda, 1) otherwise null
+		                in
+		                    resultado <> null and Table.RowCount(resultado) > 0
+		        ),
+		        ultimaData = if List.Count(datasComDados) > 0 then List.First(datasComDados) else error "Nenhuma cotação encontrada nos últimos 30 dias"
+		    in
+		        ultimaData,
+		
+		    // Função que faz a paginação e busca tudo
+		    getCotacoesPaginacao = (dataInicial as date, dataFinal as date, moeda as text) as table =>
+		    let
+		        todasPaginas = List.Generate(
+		            () => [ pagina = 1, cotacao = try getCotacoes(dataInicial, dataFinal, moeda, 1) otherwise null ],
+		            each [cotacao] <> null and Table.RowCount([cotacao]) > 0,
+		            each [ pagina = [pagina] + 1, cotacao = try getCotacoes(dataInicial, dataFinal, moeda, [pagina]) otherwise null ],
+		            each [cotacao]
+		        ) 
+		    in
+		        Table.AddColumn(Table.Combine(todasPaginas), "Moeda", each moeda, type text),
+		
+		    // Função principal para processar todas cotações
+		    processaCotacoes = (dataInicial as date, dataFinal as date) as table =>
+		    let
+		        // Pega uma moeda qualquer para testar a última data válida (exemplo: USD)
+		        moedaTeste = "USD",
+		        dataFinalValida = obterUltimaDataComCotacao(dataFinal, moedaTeste),
+		
+		        // Aqui você precisa já ter a lista "moedas" no seu ambiente
+		        moedas = List.Select(moedas[Moeda], each _ <> "BRL"),
+		
+		        todasCotacoes = List.Accumulate(
+		            moedas,
+		            #table({},{}),
+		            (s, c) => 
+		            Table.Combine({s, getCotacoesPaginacao(dataInicial, dataFinalValida, c)})
+		
+		        ),
+		
+		        colunasSelecionadas = Table.SelectColumns(
+		            todasCotacoes,
+		            { "Moeda", "dataHoraCotacao", "cotacaoCompra", "tipoBoletim" }
+		        ),
+		
+		        colunasRenomeadas = Table.RenameColumns(
+		            colunasSelecionadas,
+		            {
+		                {"dataHoraCotacao", "DataHora"},
+		                {"cotacaoCompra", "Cotacao"},
+		                {"tipoBoletim", "TipoBoletim"}
+		            }
+		        ),
+		
+		        tipoAlterado = Table.TransformColumnTypes(
+		            colunasRenomeadas,
+		            {
+		                {"DataHora", DateTime.Type},
+		                {"Cotacao", Number.Type}, 
+		                {"TipoBoletim", Text.Type}
+		            }
+		        ),
+		
+		        dataAdicionada = Table.AddColumn(
+		            tipoAlterado,
+		            "Data", 
+		            each DateTime.Date([DataHora]),
+		            type date
+		        )
+		
+		    in
+		        dataAdicionada   
+		
+		in processaCotacoes
+		```
+	lineageTag: 684e44c1-77aa-4466-a16c-7acf4841598e
+	queryGroup: Funções
+
+	annotation PBI_NavigationStepName = Navegação
+
+	annotation PBI_ResultType = Function
+
+expression data_final =
+		let
+		    Fonte = DateTime.Date(DateTime.LocalNow())
+		in
+		    Fonte
+	lineageTag: d0ab7882-4cac-44d7-8714-d0af5d1d676e
+	queryGroup: Parâmetros
+
+	annotation PBI_NavigationStepName = Navegação
+
+	annotation PBI_ResultType = Date
+
